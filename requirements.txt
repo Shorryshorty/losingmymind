@@ -5,4 +5,5 @@ numpy
 scikit-learn
 matplotlib
 transformers
+torch
 requests

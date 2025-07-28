@@ -13,10 +13,11 @@ from streamlit_autorefresh import st_autorefresh
 API_KEY = "d224d79r01qt8676madgd224d79r01qt8676mae0"
 st.set_page_config(layout="centered")
 st_autorefresh(interval=5 * 60 * 1000, key="auto_refresh")
-st.title("📈 Osakeagentti – Uutisdata + RSI/MACD")
+st.title("📈 Osakeagentti – Uutisdata + RSI/MACD + Usean osakkeen vertailu")
 
 # --- Syötteet ---
-symbol = st.text_input("Syötä osaketunnus (esim. TSLA, AAPL):", "TSLA")
+symbols_input = st.text_input("Syötä osaketunnukset pilkulla erotettuna (esim. TSLA,AAPL,MSFT):", "TSLA")
+symbols = [s.strip().upper() for s in symbols_input.split(",") if s.strip()]
 risk = st.selectbox("Valitse riskitaso:", ["matala", "keskitaso", "korkea"])
 days_ahead = st.slider("Valitse ennustepäivien määrä:", 3, 10, 5)
 
@@ -49,6 +50,7 @@ def analyze_sentiment_finbert(news_list):
         probs = torch.nn.functional.softmax(outputs.logits, dim=1)
         label = torch.argmax(probs).item()
         score = probs[0][label].item()
+        # label: 0=negative,1=neutral,2=positive; map to -1,0,1
         sentiment_value = {-1: -score, 0: 0, 1: score}[label - 1]
         sentiments.append(sentiment_value)
     return sum(sentiments) / len(sentiments) if sentiments else 0
@@ -79,101 +81,104 @@ def load_data(symbol, days_ahead, sentiment_score):
     data['Target'] = np.where(data['Close'].shift(-days_ahead) > data['Close'], 1, 0)
     return data
 
-# --- Näyttö: uutiset ---
-news = fetch_news(symbol, API_KEY)
-st.subheader("🗞️ Viimeisimmät uutiset")
-if news:
-    for n in news:
-        st.write(f"- {n['datetime'][:10]}: {n['headline']}")
-else:
-    st.write("Ei uutisia saatavilla.")
+# --- Loopataan osakkeet ja näytetään ---
+for symbol in symbols:
+    st.header(f"📊 {symbol}")
+    
+    # Uutiset
+    news = fetch_news(symbol, API_KEY)
+    st.subheader("🗞️ Viimeisimmät uutiset")
+    if news:
+        for n in news:
+            st.write(f"- {n['datetime'][:10]}: {n['headline']}")
+    else:
+        st.write("Ei uutisia saatavilla.")
+    
+    # Sentimentti
+    sentiment_score = analyze_sentiment_finbert(news)
+    st.write(f"Sentimenttipiste (FinBERT): {sentiment_score:.3f}")
+    
+    # Data
+    data = load_data(symbol, days_ahead, sentiment_score)
+    features = ['SMA_10', 'SMA_50', 'Return', 'Sentiment', 'RSI', 'MACD', 'Signal_Line']
+    X = data[features]
+    y = data['Target']
+    
+    # Malli ja ennuste
+    model = RandomForestClassifier(n_estimators=100, random_state=42)
+    model.fit(X[:-10], y[:-10])
+    
+    latest = X.iloc[[-1]]
+    proba = model.predict_proba(latest)[0]
+    confidence = abs(proba[1] - proba[0])
+    prediction = model.predict(latest)[0]
+    
+    thresholds = {"matala": 0.05, "keskitaso": 0.1, "korkea": 0.2}
+    threshold = thresholds[risk]
+    
+    if confidence < threshold:
+        suggestion = "🤔 PIDÄ (epävarma signaali)"
+    elif prediction == 1:
+        suggestion = "📈 OSTA"
+    else:
+        suggestion = "📉 MYY"
+    
+    st.subheader("🔍 Agentin suositus")
+    st.write(f"**{suggestion}**")
+    st.write(f"Luottamus: `{confidence:.2f}`")
+    
+    # Näytetään viimeisin sulkuarvo korjattuna
+    latest_close = data['Close'].iloc[-1]
+    st.write(f"Viimeisin sulkuarvo: **{float(latest_close):.2f} €**")
+    
+    # Ennusteen tulkinta
+    direction = "nousussa 📈" if prediction == 1 else "laskussa 📉"
+    st.write(f"Agentin ennuste seuraavalle {days_ahead} päivälle: **{direction}**")
+    
+    # RSI ja MACD
+    st.write(f"RSI: {data['RSI'].iloc[-1]:.2f}")
+    st.write(f"MACD: {data['MACD'].iloc[-1]:.2f} | Signal: {data['Signal_Line'].iloc[-1]:.2f}")
+    
+    # Takautuva simulaatio
+    st.subheader("🧪 Takautuva simulaatio")
+    capital = 10000
+    cash = capital
+    position = 0
+    portfolio_values = []
+    dates = []
+    
+    for i in range(len(X) - 30, len(X) - days_ahead):
+        row = X.iloc[[i]]
+        pred = model.predict(row)[0]
+        close_price = float(data['Close'].iloc[i])
+    
+        if pred == 1 and cash >= close_price:
+            position += 1
+            cash -= close_price
+        elif pred == 0 and position > 0:
+            cash += close_price * position
+            position = 0
+    
+        total_value = cash + position * close_price
+        portfolio_values.append(total_value)
+        dates.append(data.index[i])
+    
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.plot(dates, portfolio_values, label="Agentin portfolio")
+    ax.set_title("Simuloitu tuotto")
+    ax.set_ylabel("€")
+    ax.legend()
+    st.pyplot(fig)
+    
+    final_return = portfolio_values[-1] - capital
+    st.markdown(f"**Lopputulos:** `{portfolio_values[-1]:.2f}€`")
+    st.markdown(f"**Voitto/Tappio:** `{final_return:+.2f}€`")
+    
+    st.write("---")
 
-# --- Analyysi ---
-sentiment_score = analyze_sentiment_finbert(news)
-st.write(f"Sentimenttipiste (FinBERT): {sentiment_score:.3f}")
-
-data = load_data(symbol, days_ahead, sentiment_score)
-features = ['SMA_10', 'SMA_50', 'Return', 'Sentiment', 'RSI', 'MACD', 'Signal_Line']
-X = data[features]
-y = data['Target']
-
-model = RandomForestClassifier(n_estimators=100, random_state=42)
-model.fit(X[:-10], y[:-10])
-
-latest = X.iloc[[-1]]
-proba = model.predict_proba(latest)[0]
-confidence = abs(proba[1] - proba[0])
-prediction = model.predict(latest)[0]
-
-# --- Osakkeen viimeisin arvo ja ennuste ---
-st.subheader(f"💹 {symbol} viimeisin arvo ja ennuste")
-
-latest_close = data['Close'].iloc[-1]
-st.write(f"Viimeisin sulkuarvo: **{latest_close:.2f} €**")
-
-direction = "nousussa 📈" if prediction == 1 else "laskussa 📉"
-st.write(f"Agentin ennuste seuraavalle {days_ahead} päivälle: **{direction}**")
-
-st.write(f"Luottamus ennusteeseen: `{confidence:.2f}` (0 = täysin epävarma, 1 = erittäin varma)")
-
-st.markdown("""
-**Miten tekoäly tekee päätöksen?**  
-- Malli käyttää yli 2 vuoden historiallista dataa: hintoja, liukuvia keskiarvoja (SMA), tuottoja, sentimenttipisteitä uutisista sekä RSI- ja MACD-indikaattoreita.  
-- RandomForest-malli oppii yhteyksiä, jotka ennustavat osakkeen hinnan nousemisen tai laskun tietyn päivämäärän kuluessa.  
-- Nykyinen tilanne (viimeisimmät arvot ja indikaattorit) syötetään mallille, joka antaa ennusteen ja luottamusarvon.  
-- Sentimenttianalyysi huomioi markkinatunnelman uutisissa.  
+# --- Muistutus siitä, miten tekoäly päättää ---
+st.info("""
+Tekoälyn sijoitussuositukset perustuvat historiallisten hintatietojen teknisiin indikaattoreihin (SMA, RSI, MACD), uutisotsikoiden sentimenttianalyysiin FinBERT-mallilla sekä satunnaismetsämallin ennusteisiin osakkeen hinnan kehityksestä seuraavan valitun päivän aikana.
+    
+Luottamusarvo kertoo mallin varmuudesta ennusteessa, ja riskitaso vaikuttaa, millä varmuustasolla suositus annetaan.
 """)
-
-# --- Riskitaso: luottamusraja ---
-thresholds = {"matala": 0.05, "keskitaso": 0.1, "korkea": 0.2}
-threshold = thresholds[risk]
-
-if confidence < threshold:
-    suggestion = "🤔 PIDÄ (epävarma signaali)"
-elif prediction == 1:
-    suggestion = "📈 OSTA"
-else:
-    suggestion = "📉 MYY"
-
-st.subheader("🔍 Agentin suositus")
-st.write(f"**{suggestion}**")
-st.write(f"Luottamus: `{confidence:.2f}`")
-
-# --- RSI/MACD näyttö ---
-st.write("---")
-st.write(f"**RSI:** {data['RSI'].iloc[-1]:.2f}")
-st.write(f"**MACD:** {data['MACD'].iloc[-1]:.2f} | Signal: {data['Signal_Line'].iloc[-1]:.2f}")
-
-# --- Takautuva simulaatio ---
-st.subheader("🧪 Takautuva simulaatio")
-capital = 10000
-cash = capital
-position = 0
-portfolio_values = []
-dates = []
-
-for i in range(len(X) - 30, len(X) - days_ahead):
-    row = X.iloc[[i]]
-    pred = model.predict(row)[0]
-    close_price = float(data['Close'].iloc[i])
-
-    if pred == 1 and cash >= close_price:
-        position += 1
-        cash -= close_price
-    elif pred == 0 and position > 0:
-        cash += close_price * position
-        position = 0
-
-    total_value = cash + position * close_price
-    portfolio_values.append(total_value)
-    dates.append(data.index[i])
-
-fig, ax = plt.subplots(figsize=(10, 4))
-ax.plot(dates, portfolio_values, label="Agentin portfolio")
-ax.set_title("Simuloitu tuotto")
-ax.set_ylabel("€")
-ax.legend()
-st.pyplot(fig)
-final_return = portfolio_values[-1] - capital
-st.markdown(f"**Lopputulos:** `{portfolio_values[-1]:.2f}€`")
-st.markdown(f"**Voitto/Tappio:** `{final_return:+.2f}€`")

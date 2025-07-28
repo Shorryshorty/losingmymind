@@ -13,15 +13,14 @@ from streamlit_autorefresh import st_autorefresh
 API_KEY = "d224d79r01qt8676madgd224d79r01qt8676mae0"
 st.set_page_config(layout="centered")
 st_autorefresh(interval=5 * 60 * 1000, key="auto_refresh")
-st.title("📈 Osakeagentti – Usean osakkeen vertailu + RSI/MACD")
+st.title("📈 Osakeagentti – Uutisdata + RSI/MACD")
 
 # --- Syötteet ---
-symbols_input = st.text_input("Syötä osaketunnukset pilkulla erotettuna (esim. TSLA,AAPL,MSFT):", "TSLA")
+symbol = st.text_input("Syötä osaketunnus (esim. TSLA, AAPL):", "TSLA")
 risk = st.selectbox("Valitse riskitaso:", ["matala", "keskitaso", "korkea"])
 days_ahead = st.slider("Valitse ennustepäivien määrä:", 3, 10, 5)
 
-symbols = [sym.strip().upper() for sym in symbols_input.split(",") if sym.strip()]
-
+# --- Uutisten haku ---
 @st.cache_data
 def fetch_news(symbol, api_key):
     url = f'https://finnhub.io/api/v1/company-news?symbol={symbol}&from=2024-07-01&to=2024-07-28&token={api_key}'
@@ -30,6 +29,7 @@ def fetch_news(symbol, api_key):
         return response.json()[:5]
     return []
 
+# --- FinBERT Sentimentti ---
 @st.cache_resource
 def load_finbert_model():
     tokenizer = AutoTokenizer.from_pretrained("ProsusAI/finbert")
@@ -53,6 +53,7 @@ def analyze_sentiment_finbert(news_list):
         sentiments.append(sentiment_value)
     return sum(sentiments) / len(sentiments) if sentiments else 0
 
+# --- Indikaattorit ---
 def compute_indicators(df):
     delta = df['Close'].diff()
     gain = delta.where(delta > 0, 0).rolling(14).mean()
@@ -65,6 +66,7 @@ def compute_indicators(df):
     df['Signal_Line'] = df['MACD'].ewm(span=9, adjust=False).mean()
     return df
 
+# --- Datan haku ---
 @st.cache_data
 def load_data(symbol, days_ahead, sentiment_score):
     data = yf.download(symbol, period="2y", interval="1d")
@@ -77,66 +79,101 @@ def load_data(symbol, days_ahead, sentiment_score):
     data['Target'] = np.where(data['Close'].shift(-days_ahead) > data['Close'], 1, 0)
     return data
 
+# --- Näyttö: uutiset ---
+news = fetch_news(symbol, API_KEY)
+st.subheader("🗞️ Viimeisimmät uutiset")
+if news:
+    for n in news:
+        st.write(f"- {n['datetime'][:10]}: {n['headline']}")
+else:
+    st.write("Ei uutisia saatavilla.")
+
+# --- Analyysi ---
+sentiment_score = analyze_sentiment_finbert(news)
+st.write(f"Sentimenttipiste (FinBERT): {sentiment_score:.3f}")
+
+data = load_data(symbol, days_ahead, sentiment_score)
+features = ['SMA_10', 'SMA_50', 'Return', 'Sentiment', 'RSI', 'MACD', 'Signal_Line']
+X = data[features]
+y = data['Target']
+
+model = RandomForestClassifier(n_estimators=100, random_state=42)
+model.fit(X[:-10], y[:-10])
+
+latest = X.iloc[[-1]]
+proba = model.predict_proba(latest)[0]
+confidence = abs(proba[1] - proba[0])
+prediction = model.predict(latest)[0]
+
+# --- Osakkeen viimeisin arvo ja ennuste ---
+st.subheader(f"💹 {symbol} viimeisin arvo ja ennuste")
+
+latest_close = data['Close'].iloc[-1]
+st.write(f"Viimeisin sulkuarvo: **{latest_close:.2f} €**")
+
+direction = "nousussa 📈" if prediction == 1 else "laskussa 📉"
+st.write(f"Agentin ennuste seuraavalle {days_ahead} päivälle: **{direction}**")
+
+st.write(f"Luottamus ennusteeseen: `{confidence:.2f}` (0 = täysin epävarma, 1 = erittäin varma)")
+
+st.markdown("""
+**Miten tekoäly tekee päätöksen?**  
+- Malli käyttää yli 2 vuoden historiallista dataa: hintoja, liukuvia keskiarvoja (SMA), tuottoja, sentimenttipisteitä uutisista sekä RSI- ja MACD-indikaattoreita.  
+- RandomForest-malli oppii yhteyksiä, jotka ennustavat osakkeen hinnan nousemisen tai laskun tietyn päivämäärän kuluessa.  
+- Nykyinen tilanne (viimeisimmät arvot ja indikaattorit) syötetään mallille, joka antaa ennusteen ja luottamusarvon.  
+- Sentimenttianalyysi huomioi markkinatunnelman uutisissa.  
+""")
+
+# --- Riskitaso: luottamusraja ---
+thresholds = {"matala": 0.05, "keskitaso": 0.1, "korkea": 0.2}
+threshold = thresholds[risk]
+
+if confidence < threshold:
+    suggestion = "🤔 PIDÄ (epävarma signaali)"
+elif prediction == 1:
+    suggestion = "📈 OSTA"
+else:
+    suggestion = "📉 MYY"
+
+st.subheader("🔍 Agentin suositus")
+st.write(f"**{suggestion}**")
+st.write(f"Luottamus: `{confidence:.2f}`")
+
+# --- RSI/MACD näyttö ---
 st.write("---")
-st.info(
-    """
-    **Tekoälyn päätöksen perusteet:**
+st.write(f"**RSI:** {data['RSI'].iloc[-1]:.2f}")
+st.write(f"**MACD:** {data['MACD'].iloc[-1]:.2f} | Signal: {data['Signal_Line'].iloc[-1]:.2f}")
 
-    - Käytämme historiallisia osakehinnan piirteitä: SMA_10, SMA_50, tuotto (%).
-    - Uutisten sentimentti arvioidaan FinBERT-mallilla (positiivinen / negatiivinen vaikutus).
-    - RSI ja MACD indikaattorit auttavat tunnistamaan yliostettuja tai ylimyytyjä tilanteita.
-    - Malli antaa luottamusarvon, jota verrataan riskitasoon.
-    - Suositukset ovat: 📈 OSTA, 🤔 PIDÄ (epävarma), 📉 MYY.
-    """
-)
+# --- Takautuva simulaatio ---
+st.subheader("🧪 Takautuva simulaatio")
+capital = 10000
+cash = capital
+position = 0
+portfolio_values = []
+dates = []
 
-results = []
-for symbol in symbols:
-    st.subheader(f"📊 Analyysi: {symbol}")
+for i in range(len(X) - 30, len(X) - days_ahead):
+    row = X.iloc[[i]]
+    pred = model.predict(row)[0]
+    close_price = float(data['Close'].iloc[i])
 
-    news = fetch_news(symbol, API_KEY)
-    if news:
-        st.write("🗞️ Viimeisimmät uutiset:")
-        for n in news:
-            st.write(f"- {n['datetime'][:10]}: {n['headline']}")
-    else:
-        st.write("Ei uutisia saatavilla.")
+    if pred == 1 and cash >= close_price:
+        position += 1
+        cash -= close_price
+    elif pred == 0 and position > 0:
+        cash += close_price * position
+        position = 0
 
-    sentiment_score = analyze_sentiment_finbert(news)
-    st.write(f"Sentimenttipiste (FinBERT): {sentiment_score:.3f}")
+    total_value = cash + position * close_price
+    portfolio_values.append(total_value)
+    dates.append(data.index[i])
 
-    data = load_data(symbol, days_ahead, sentiment_score)
-    features = ['SMA_10', 'SMA_50', 'Return', 'Sentiment', 'RSI', 'MACD', 'Signal_Line']
-    X = data[features]
-    y = data['Target']
-
-    model = RandomForestClassifier(n_estimators=100, random_state=42)
-    model.fit(X[:-10], y[:-10])
-
-    latest = X.iloc[[-1]]
-    proba = model.predict_proba(latest)[0]
-    confidence = abs(proba[1] - proba[0])
-    prediction = model.predict(latest)[0]
-
-    thresholds = {"matala": 0.05, "keskitaso": 0.1, "korkea": 0.2}
-    threshold = thresholds[risk]
-
-    if confidence < threshold:
-        suggestion = "🤔 PIDÄ (epävarma signaali)"
-    elif prediction == 1:
-        suggestion = "📈 OSTA"
-    else:
-        suggestion = "📉 MYY"
-
-    st.write(f"**Agentin suositus:** {suggestion}")
-    st.write(f"Luottamus: `{confidence:.2f}`")
-    st.write(f"**RSI:** {data['RSI'].iloc[-1]:.2f}")
-    st.write(f"**MACD:** {data['MACD'].iloc[-1]:.2f} | Signaali: {data['Signal_Line'].iloc[-1]:.2f}")
-
-    results.append((symbol, suggestion, confidence))
-
-# Yhteenveto
-st.write("---")
-st.subheader("📋 Yhteenveto suosituksista")
-for symbol, suggestion, confidence in results:
-    st.write(f"{symbol}: {suggestion} (luottamus {confidence:.2f})")
+fig, ax = plt.subplots(figsize=(10, 4))
+ax.plot(dates, portfolio_values, label="Agentin portfolio")
+ax.set_title("Simuloitu tuotto")
+ax.set_ylabel("€")
+ax.legend()
+st.pyplot(fig)
+final_return = portfolio_values[-1] - capital
+st.markdown(f"**Lopputulos:** `{portfolio_values[-1]:.2f}€`")
+st.markdown(f"**Voitto/Tappio:** `{final_return:+.2f}€`")

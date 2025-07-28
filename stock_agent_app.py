@@ -5,8 +5,9 @@ import numpy as np
 import requests
 from sklearn.ensemble import RandomForestClassifier
 import matplotlib.pyplot as plt
-import torch
+import datetime
 from transformers import pipeline
+import time
 
 # --- Ladataan sentimenttipipeline kerran ---
 sentiment_pipeline = pipeline("sentiment-analysis")
@@ -22,8 +23,16 @@ symbol = st.text_input("Syötä osaketunnus (esim. TSLA, AAPL):", "TSLA")
 risk = st.selectbox("Valitse riskitaso:", ["matala", "keskitaso", "korkea"])
 days_ahead = st.slider("Valitse ennustepäivien määrä:", 3, 10, 5)
 
+# --- Päivityksen ajastin ---
+refresh_rate_sec = 60  # 60 sekuntia
+
+# Näytetään info päivityksestä
+time_placeholder = st.empty()
+next_refresh = datetime.datetime.now() + datetime.timedelta(seconds=refresh_rate_sec)
+time_placeholder.markdown(f"⏳ Seuraava päivitys: {next_refresh.strftime('%H:%M:%S')}")
+
 # --- Uutisten haku ---
-@st.cache_data
+@st.cache_data(ttl=refresh_rate_sec)  # TTL = cachein voimassaoloaika sekunteina
 def fetch_news(symbol, api_key):
     url = f'https://finnhub.io/api/v1/company-news?symbol={symbol}&from=2024-07-01&to=2024-07-26&token={api_key}'
     response = requests.get(url)
@@ -51,9 +60,10 @@ def analyze_sentiment(news_list):
     return 0
 
 # --- Historian ja featureiden haku ---
-@st.cache_data
+@st.cache_data(ttl=refresh_rate_sec)
 def load_data(symbol, days_ahead, sentiment_score):
-    data = yf.download(symbol, start="2015-01-01", end="2024-01-01")
+    today = datetime.datetime.today().strftime('%Y-%m-%d')
+    data = yf.download(symbol, start="2015-01-01", end=today)
     data['SMA_10'] = data['Close'].rolling(10).mean()
     data['SMA_50'] = data['Close'].rolling(50).mean()
     data['Return'] = data['Close'].pct_change()
@@ -62,8 +72,12 @@ def load_data(symbol, days_ahead, sentiment_score):
     data['Target'] = np.where(data['Close'].shift(-days_ahead) > data['Close'], 1, 0)
     return data
 
-# --- Uutisten näyttö ---
+# --- Haetaan data ---
 news = fetch_news(symbol, API_KEY)
+sentiment_score = analyze_sentiment(news)
+data = load_data(symbol, days_ahead, sentiment_score)
+
+# --- Uutisten näyttö ---
 st.subheader("🗞️ Viimeisimmät uutiset")
 if news:
     for n in news:
@@ -71,17 +85,13 @@ if news:
 else:
     st.write("Uutisia ei löytynyt tai API-virhe.")
 
-# --- Sentimenttipiste ---
-sentiment_score = analyze_sentiment(news)
 st.write(f"Sentimenttipiste: {sentiment_score:.3f}")
 
-# --- Ladataan osakedata ---
-data = load_data(symbol, days_ahead, sentiment_score)
+# --- Mallin koulutus ---
 features = ['SMA_10', 'SMA_50', 'Return', 'Sentiment']
 X = data[features]
 y = data['Target']
 
-# --- Mallin koulutus ---
 model = RandomForestClassifier(n_estimators=100, random_state=42)
 model.fit(X[:-200], y[:-200])
 
@@ -91,7 +101,6 @@ proba = model.predict_proba(latest)[0]
 confidence = abs(proba[1] - proba[0])
 prediction = model.predict(latest)[0]
 
-# --- Riskitaso: luottamusraja ---
 confidence_threshold = {
     "matala": 0.05,
     "keskitaso": 0.1,
@@ -109,7 +118,7 @@ st.subheader("🔍 Agentin suositus")
 st.write(f"**{suggestion}**")
 st.write(f"Luottamus: `{confidence:.2f}`")
 
-# --- Takautuva simulaatio (backtest) ---
+# --- Takautuva simulaatio ---
 st.subheader("🧪 Takautuva simulaatio")
 
 capital = 10000
@@ -121,7 +130,7 @@ dates = []
 for i in range(len(X) - 200, len(X) - days_ahead):
     row = X.iloc[[i]]
     pred = model.predict(row)[0]
-    close_price = float(data['Close'].iloc[i])  # varmistetaan yksittäinen arvo
+    close_price = float(data['Close'].iloc[i])
 
     if pred == 1 and cash >= close_price:
         position += 1
@@ -144,3 +153,7 @@ st.pyplot(fig)
 final_return = portfolio_values[-1] - capital
 st.markdown(f"**Lopputulos:** `{portfolio_values[-1]:.2f}€`")
 st.markdown(f"**Voitto/Tappio:** `{final_return:+.2f}€`")
+
+# --- Automaattinen päivitys 60 sekunnin välein ---
+time.sleep(refresh_rate_sec)
+st.experimental_rerun()

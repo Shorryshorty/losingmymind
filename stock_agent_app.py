@@ -5,7 +5,11 @@ import numpy as np
 import requests
 from sklearn.ensemble import RandomForestClassifier
 import matplotlib.pyplot as plt
+import torch  # Lisätty
 from transformers import pipeline
+
+# --- Ladataan sentimenttipipeline kerran ---
+sentiment_pipeline = pipeline("sentiment-analysis")
 
 # --- Asetukset ---
 API_KEY = "d224d79r01qt8676madgd224d79r01qt8676mae0"  # Finnhub API-avain
@@ -31,7 +35,6 @@ def fetch_news(symbol, api_key):
 
 # --- Sentimenttianalyysi ---
 def analyze_sentiment(news_list):
-    sentiment_pipeline = pipeline("sentiment-analysis")
     sentiments = []
     for item in news_list:
         headline = item.get('headline', '')
